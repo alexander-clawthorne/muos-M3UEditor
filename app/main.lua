@@ -18,6 +18,7 @@ local fileScroll = 0
 
 local entries = {}
 local header = {}
+local trailer = {}
 local entryIndex = 1
 local entryScroll = 0
 local currentPath = nil
@@ -66,8 +67,18 @@ local function loadPlaylist(path)
         return nil, "cannot open file"
     end
 
+    -- The whole #EXTINF line is kept verbatim, not just the label after the
+    -- comma. IPTV playlists carry tvg-id / tvg-logo / group-title attributes
+    -- there, and rebuilding the line from the label alone would quietly throw
+    -- them away.
+    --
+    -- Other tags (#EXTGRP, #EXTVLCOPT, blank lines) are attached to the entry
+    -- that follows them, split by whether they came before or after that
+    -- entry's #EXTINF, so a save puts them back exactly where they were.
     local newHeader, newEntries = {}, {}
-    local pendingLabel, pendingEnabled = nil, true
+    local pendingLabel, pendingEnabled, pendingExtinf = nil, true, nil
+    local pendingBefore, pendingAfter = {}, {}
+    local sawExtinf = false
     local seenEntry = false
 
     for raw in handle:lines() do
@@ -80,27 +91,44 @@ local function loadPlaylist(path)
         end
 
         if body:match("^#EXTINF") then
+            pendingExtinf = body
             pendingLabel = body:match("^#EXTINF:[^,]*,(.*)$") or body
             pendingEnabled = not disabled
+            sawExtinf = true
             seenEntry = true
         elseif body ~= "" and not body:match("^#") then
             newEntries[#newEntries + 1] = {
                 label = pendingLabel or basename(body),
                 url = body,
                 enabled = not disabled and pendingEnabled,
+                extinf = pendingExtinf,
+                before = pendingBefore,
+                after = pendingAfter,
             }
-            pendingLabel = nil
-            pendingEnabled = true
+            pendingLabel, pendingEnabled, pendingExtinf = nil, true, nil
+            pendingBefore, pendingAfter = {}, {}
+            sawExtinf = false
         elseif not seenEntry then
             newHeader[#newHeader + 1] = line
+        elseif sawExtinf then
+            pendingAfter[#pendingAfter + 1] = body
+        else
+            pendingBefore[#pendingBefore + 1] = body
         end
     end
     handle:close()
 
+    -- Anything after the last URL has no entry to attach to, so it is kept
+    -- aside verbatim and written back at the end of the file.
+    local newTrailer = {}
+    for _, line in ipairs(pendingBefore) do newTrailer[#newTrailer + 1] = line end
+    if pendingExtinf then newTrailer[#newTrailer + 1] = pendingExtinf end
+    for _, line in ipairs(pendingAfter) do newTrailer[#newTrailer + 1] = line end
+
     if #newHeader == 0 then
         newHeader = { "#EXTM3U" }
     end
-    return newEntries, newHeader
+    return newEntries, newHeader, newTrailer
 end
 
 local function savePlaylist()
@@ -113,10 +141,28 @@ local function savePlaylist()
     for _, line in ipairs(header) do
         handle:write(line, "\n")
     end
+    local function writeTags(lines, prefix)
+        for _, tag in ipairs(lines or {}) do
+            -- never prefix a blank line; a bare marker is just noise
+            if tag == "" then
+                handle:write("\n")
+            else
+                handle:write(prefix, tag, "\n")
+            end
+        end
+    end
+
     for _, entry in ipairs(entries) do
         local prefix = entry.enabled and "" or MARKER
-        handle:write(prefix, "#EXTINF:-1,", entry.label, "\n")
+        writeTags(entry.before, prefix)
+        if entry.extinf then
+            handle:write(prefix, entry.extinf, "\n")
+        end
+        writeTags(entry.after, prefix)
         handle:write(prefix, entry.url, "\n")
+    end
+    for _, line in ipairs(trailer) do
+        handle:write(line, "\n")
     end
     handle:close()
     dirty = false
@@ -204,12 +250,12 @@ function love.keypressed(key)
 
     if state == "files" then
         if key == "return" and files[fileIndex] then
-            local loaded, head = loadPlaylist(files[fileIndex])
+            local loaded, head, tail = loadPlaylist(files[fileIndex])
             if not loaded then
                 setStatus("COULD NOT OPEN FILE")
                 return
             end
-            entries, header = loaded, head
+            entries, header, trailer = loaded, head, tail
             currentPath = files[fileIndex]
             entryIndex, entryScroll, dirty = 1, 0, false
             state = "entries"
