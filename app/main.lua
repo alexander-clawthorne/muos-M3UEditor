@@ -8,8 +8,13 @@ local PLAYLIST_DIRS = {
     "/mnt/mmc/ROMS/IPTV",
 }
 
-local MARKER = "#OFF#"
+local MARKER = "#OFF#"      -- what a disabled line is prefixed with
+local GRAB_COUNT = 5        -- how many entries L1 enables from the cursor
 local ROWS = 11
+
+-- PLAYLIST_DIRS, MARKER and GRAB_COUNT are all overridable in config.ini next
+-- to this file; see README.md. A stock muOS install needs no configuration.
+local configPath = love.filesystem.getSource() .. "/config.ini"
 
 local state = "files"      -- "files" | "entries"
 local files = {}
@@ -41,6 +46,30 @@ end
 
 local function basename(path)
     return path:match("([^/]+)$") or path
+end
+
+local function loadConfig()
+    local handle = io.open(configPath, "r")
+    if not handle then return end
+    local values = {}
+    for line in handle:lines() do
+        if not line:match("^%s*#") then
+            local key, value = line:match("^%s*([%w_]+)%s*=%s*(.-)%s*$")
+            if key then values[key:lower()] = value end
+        end
+    end
+    handle:close()
+
+    if values.playlist_dirs and values.playlist_dirs ~= "" then
+        local dirs = {}
+        for part in values.playlist_dirs:gmatch("[^,]+") do
+            part = trim(part)
+            if part ~= "" then dirs[#dirs + 1] = part end
+        end
+        if #dirs > 0 then PLAYLIST_DIRS = dirs end
+    end
+    if values.marker and values.marker ~= "" then MARKER = trim(values.marker) end
+    if values.grab_count then GRAB_COUNT = tonumber(values.grab_count) or GRAB_COUNT end
 end
 
 local function listPlaylists()
@@ -226,6 +255,7 @@ function love.load()
     love.graphics.setBackgroundColor(0.07, 0.08, 0.11)
     font = love.graphics.newFont(16)
     fontSmall = love.graphics.newFont(12)
+    loadConfig()
     files = listPlaylists()
     if #files == 0 then
         setStatus("NO .M3U FILES FOUND")
@@ -273,7 +303,7 @@ function love.keypressed(key)
     elseif key == "d" then
         setAll(false)
     elseif key == "n" then
-        grabNext(5)
+        grabNext(GRAB_COUNT)
     elseif key == "s" then
         savePlaylist()
     end
